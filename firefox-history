@@ -1,0 +1,104 @@
+#!/bin/bash	
+
+# Query firefox history on the linux CLI
+
+# 1. create a file $XDG_CONFIG_HOME/firefox-history-location
+# 2. It must simply contain the name of your firefox profile:
+#     for instance "3aEfe29er.default-release"
+
+# If that profile is not found in ~/.mozilla/firefox/,
+# the most recent directory in $HOME/.mozilla/firefox is used instead.
+
+# This work is dedicated to the public domain
+
+progName="$( basename "$0" )"
+version=0.0.1
+
+warn() { local fmt="$1"; shift; printf "$progName: $fmt\n" "$@" >&2; }
+die () { local st="$?"; warn "$@"; exit "$st"; } 
+define(){ IFS='\n' read -r -d '' ${1} || true; }
+
+define helpString <<EOF
+$progName v$version - desc
+Syntax: $progName [OPTIONS]
+
+OPTIONS:
+ --help -h        Show help
+ --version -v     Show version and exit
+ --setup          Helps writing the profile to use
+EOF
+
+for i in "$@"; do
+    case $i in
+        --help | -h ) shift; echo "$helpString"; exit 0 ;;
+        --version | -v ) shift; echo "$version"; exit 0 ;;
+        --setup ) shift; optSetup=1 ;; 
+        -* ) echo "Unknown option: $1"; exit 1 ;;
+        *) ;;
+    esac
+done
+
+locationfile="$XDG_CONFIG_HOME/firefox-history-location"
+firefoxdir="$HOME/.mozilla/firefox"
+
+[[ -d "$firefoxdir" ]] || [[ -r "$firefoxdir" ]] || die "$firefoxdir is not readable"
+
+if [[ -e "$locationfile" ]] && [[ -s "$locationfile" ]]; then
+    # exists, and size is not zero
+    profile=$(< "$locationfile" )
+else
+    profile=$( basename $( find "$firefoxdir" -maxdepth 1 -type d -printf '%p\n' | sort -n | tail -1 ) )
+    [[ -e "$locationfile" ]] || warnProfileNotSet=1
+fi
+
+[[ -r "$firefoxdir/$profile" ]] || die "$firefoxdir/$profile does not exist or is not readable. Check you $XDG_CONFIG_HOME/firefox-history-location file?"
+
+if [[ -z $optJson ]]; then
+    # regular
+    # output is like "1234567890    https://url"
+    sqlite3 "$firefoxdir/$profile/places.sqlite" <<EOF | tr "|" '\t'
+    SELECT 
+        visit_date/1000000, 
+        url 
+    FROM moz_places, moz_historyvisits 
+    WHERE moz_places.id = moz_historyvisits.place_id 
+    ORDER BY visit_date 
+    ;
+EOF
+else
+    # json.
+    # this may contain more information, such as:
+    # - visit_date
+    # - title
+    # - url
+    # possible but not returned right now: 
+    #    visit_count, last_visit_date, is_bookmark
+    die "TODO"
+EOF
+fi
+
+if [[ -n $optSetup ]] && [[ -n $warnProfileNotSet ]]; then
+    echo 
+    echo "--setup used!"
+    echo
+    echo "We used the most recent directory in $firefoxdir ($profile)"
+    loop=1
+    while [[ $loop -eq 1 ]]; do
+        echo
+        read -p "Can we write \"$profile\" to $locationfile (to use it as the profile)? [y/n/D[ont_ask_anymore]] "
+        case $REPLY in
+            y) 
+                echo "$profile" > "$locationfile"
+                loop=0
+                ;;
+            d*) 
+                echo "Ok, we just create an empty $locationfile file then."
+                echo "Should you want to specify a default profile, put it there (whether it is $profile or another one)"
+                touch "$locationfile"
+                loop=0
+                ;;
+            n) loop=0;;
+            *) ;;
+        esac
+    done
+fi
