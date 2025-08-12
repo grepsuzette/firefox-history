@@ -1,6 +1,7 @@
 #!/bin/bash	
 
 # Query firefox history on the linux CLI
+# On Mac, requires GNU findutils (brew install findutils)
 
 # 1. create a file $XDG_CONFIG_HOME/firefox-history-location
 # 2. It must simply contain the name of your firefox profile:
@@ -39,7 +40,11 @@ for i in "$@"; do
 done
 
 locationfile="$XDG_CONFIG_HOME/firefox-history-location"
-firefoxdir="$HOME/.mozilla/firefox"
+if [[ $(uname) = Darwin ]]; then
+    firefoxdir="$HOME/Library/Application Support/Firefox/Profiles"
+else
+    firefoxdir="$HOME/.mozilla/firefox"
+fi
 
 [[ -d "$firefoxdir" ]] || [[ -r "$firefoxdir" ]] || die "$firefoxdir is not readable"
 
@@ -47,16 +52,39 @@ if [[ -e "$locationfile" ]] && [[ -s "$locationfile" ]]; then
     # exists, and size is not zero
     profile=$(< "$locationfile" )
 else
-    profile=$( basename $( find "$firefoxdir" -maxdepth 1 -type d -printf '%p\n' | sort -n | tail -1 ) )
-    [[ -e "$locationfile" ]] || warnProfileNotSet=1
+    # get the most recent profile
+    # shopt -s expand_aliases
+    # [[ $(uname) = Darwin ]] && alias basename="gbasename"
+    # [[ $(uname) = Darwin ]] && alias find="gfind"
+    # profile=$( basename "$( find "$firefoxdir" -maxdepth 1 -type d -printf '%p\n' | sort -n | tail -1 )" )
+    # [[ -e "$locationfile" ]] || warnProfileNotSet=1
+
+    # Get the most recent Firefox profile directory name
+    if [[ $(uname) = Darwin ]]; then
+        # macOS version using BSD tools
+        profile=$(find "$firefoxdir" -mindepth 1 -maxdepth 1 -type d -print0 | \
+                  xargs -0 stat -f "%m %N" | \
+                  sort -n | \
+                  tail -1 | \
+                  cut -d' ' -f2- | \
+                  xargs -I{} basename "{}")
+    else
+        # Linux version using GNU tools
+        profile=$(find "$firefoxdir" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0' | \
+                  sort -zn | \
+                  tail -zn1 | \
+                  { read -d '' -r timestamp path; basename "$path"; })
+    fi
+
 fi
 
 [[ -r "$firefoxdir/$profile" ]] || die "$firefoxdir/$profile does not exist or is not readable. Check you $XDG_CONFIG_HOME/firefox-history-location file?"
 
 if [[ -z $optJson ]]; then
+    echo "$firefoxdir/$profile/places.sqlite"
     # regular
     # output is like "1234567890    https://url"
-    sqlite3 "$firefoxdir/$profile/places.sqlite" <<EOF | tr "|" '\t'
+    sqlite3 "file:$firefoxdir/$profile/places.sqlite?immutable=1" <<EOF | tr "|" '\t'
     SELECT 
         visit_date/1000000, 
         url 
