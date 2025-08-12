@@ -1,6 +1,5 @@
-#!/bin/bash	
-
-# Query firefox history on the linux CLI
+#!/usr/bin/env bash
+# Query firefox history/bookmarks on Linux/macOS CLI
 # On Mac, requires GNU findutils (brew install findutils)
 
 # 1. create a file $XDG_CONFIG_HOME/firefox-history-location
@@ -13,100 +12,133 @@
 # This work is dedicated to the public domain
 
 progName="$( basename "$0" )"
-version=0.0.1
+version=0.1.0
 
 warn() { local fmt="$1"; shift; printf "$progName: $fmt\n" "$@" >&2; }
 die () { local st="$?"; warn "$@"; exit "$st"; } 
 define(){ IFS='\n' read -r -d '' ${1} || true; }
 
 define helpString <<EOF
-$progName v$version - desc
-Syntax: $progName [OPTIONS]
+$progName v$version - Query Firefox history/bookmarks
+Syntax: $progName [OPTIONS] [GREP_PATTERNS...]
 
 OPTIONS:
- --help -h        Show help
- --version -v     Show version and exit
- --setup          Helps writing the profile to use
+--help -h        Show help
+--version -v     Show version and exit
+--setup          Helps writing the profile to use
+--bookmarks -b   List bookmarks instead of history
+--json -j        Output in JSON format (bookmarks only)
+--raw            Output raw data without filtering
+
+Any additional arguments will be used as grep patterns to filter results.
 EOF
 
-for i in "$@"; do
-    case $i in
-        --help | -h ) shift; echo "$helpString"; exit 0 ;;
-        --version | -v ) shift; echo "$version"; exit 0 ;;
-        --setup ) shift; optSetup=1 ;; 
-        -* ) echo "Unknown option: $1"; exit 1 ;;
-        *) ;;
-    esac
+# Initialize options
+optSetup=0
+optBookmarks=0
+optJson=0
+optRaw=0
+filterArgs=()
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+case "$1" in
+--help | -h ) echo "$helpString"; exit 0 ;;
+--version | -v ) echo "$version"; exit 0 ;;
+--setup ) optSetup=1; shift ;;
+--bookmarks | -b ) optBookmarks=1; shift ;;
+--json | -j ) optJson=1; shift ;;
+--raw ) optRaw=1; shift ;;
+-* ) echo "Unknown option: $1"; exit 1 ;;
+*) filterArgs+=("$1"); shift ;;
+esac
 done
 
-locationfile="$XDG_CONFIG_HOME/firefox-history-location"
+locationfile="${XDG_CONFIG_HOME:-$HOME/.config}/firefox-history-location"
 if [[ $(uname) = Darwin ]]; then
-    firefoxdir="$HOME/Library/Application Support/Firefox/Profiles"
+firefoxdir="$HOME/Library/Application Support/Firefox/Profiles"
 else
-    firefoxdir="$HOME/.mozilla/firefox"
+firefoxdir="$HOME/.mozilla/firefox"
 fi
 
 [[ -d "$firefoxdir" ]] || [[ -r "$firefoxdir" ]] || die "$firefoxdir is not readable"
 
 if [[ -e "$locationfile" ]] && [[ -s "$locationfile" ]]; then
-    # exists, and size is not zero
-    profile=$(< "$locationfile" )
+profile=$(< "$locationfile" )
 else
-    # get the most recent profile
-    # shopt -s expand_aliases
-    # [[ $(uname) = Darwin ]] && alias basename="gbasename"
-    # [[ $(uname) = Darwin ]] && alias find="gfind"
-    # profile=$( basename "$( find "$firefoxdir" -maxdepth 1 -type d -printf '%p\n' | sort -n | tail -1 )" )
-    # [[ -e "$locationfile" ]] || warnProfileNotSet=1
-
-    # Get the most recent Firefox profile directory name
-    if [[ $(uname) = Darwin ]]; then
-        # macOS version using BSD tools
-        profile=$(find "$firefoxdir" -mindepth 1 -maxdepth 1 -type d -print0 | \
-                  xargs -0 stat -f "%m %N" | \
-                  sort -n | \
-                  tail -1 | \
-                  cut -d' ' -f2- | \
-                  xargs -I{} basename "{}")
-    else
-        # Linux version using GNU tools
-        profile=$(find "$firefoxdir" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0' | \
-                  sort -zn | \
-                  tail -zn1 | \
-                  { read -d '' -r timestamp path; basename "$path"; })
-    fi
-
+if [[ $(uname) = Darwin ]]; then
+profile=$(find "$firefoxdir" -mindepth 1 -maxdepth 1 -type d -print0 | \
+        xargs -0 stat -f "%m %N" | \
+        sort -n | \
+        tail -1 | \
+        cut -d' ' -f2- | \
+        xargs -I{} basename "{}")
+else
+profile=$(find "$firefoxdir" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\0' | \
+        sort -zn | \
+        tail -zn1 | \
+        { read -d '' -r timestamp path; basename "$path"; })
+fi
 fi
 
-[[ -r "$firefoxdir/$profile" ]] || die "$firefoxdir/$profile does not exist or is not readable. Check you $XDG_CONFIG_HOME/firefox-history-location file?"
+[[ -r "$firefoxdir/$profile" ]] || die "$firefoxdir/$profile does not exist or is not readable. Check your $locationfile file?"
 
-if [[ -z $optJson ]]; then
-    echo "$firefoxdir/$profile/places.sqlite"
-    # regular
-    # output is like "1234567890    https://url"
-    sqlite3 "file:$firefoxdir/$profile/places.sqlite?immutable=1" <<EOF | tr "|" '\t'
-    SELECT 
-        visit_date/1000000, 
-        url 
-    FROM moz_places, moz_historyvisits 
-    WHERE moz_places.id = moz_historyvisits.place_id 
-    ORDER BY visit_date 
-    ;
+db_file="$firefoxdir/$profile/places.sqlite"
+
+# Output processor function
+process_output() {
+    if [[ $optRaw -eq 1 || ${#filterArgs[@]} -eq 0 ]]; then
+        cat
+    else
+        grep -i "${filterArgs[@]}"
+    fi
+}
+
+if [[ $optBookmarks -eq 1 ]]; then
+    if [[ $optJson -eq 1 ]]; then
+        sqlite3 -json "file:$db_file?immutable=1" <<EOF | process_output
+        SELECT
+            moz_bookmarks.id AS id,
+            moz_bookmarks.dateAdded/1000000 AS dateAdded,
+            moz_places.url AS url,
+            moz_bookmarks.title AS title,
+            moz_bookmarks.parent AS folderId
+        FROM moz_bookmarks
+        JOIN moz_places ON moz_places.id = moz_bookmarks.fk
+        WHERE moz_bookmarks.type = 1
+        ORDER BY moz_bookmarks.dateAdded;
 EOF
+    else
+        echo "$db_file"
+        sqlite3 "file:$db_file?immutable=1" <<EOF | tr "|" '\t' | process_output
+        SELECT
+            moz_bookmarks.dateAdded/1000000,
+            url,
+            COALESCE(moz_bookmarks.title, '')
+        FROM moz_bookmarks
+        JOIN moz_places ON moz_places.id = moz_bookmarks.fk
+        WHERE moz_bookmarks.type = 1
+        ORDER BY moz_bookmarks.dateAdded;
+EOF
+    fi
 else
-    # json.
-    # this may contain more information, such as:
-    # - visit_date
-    # - title
-    # - url
-    # possible but not returned right now: 
-    #    visit_count, last_visit_date, is_bookmark
-    die "TODO"
+    if [[ $optJson -eq 1 ]]; then
+        die "JSON output not implemented for history. Use --bookmarks with --json."
+    else
+        echo "$db_file"
+        sqlite3 "file:$db_file?immutable=1" <<EOF | tr "|" '\t' | process_output
+        SELECT
+            visit_date/1000000,
+            url
+        FROM moz_places, moz_historyvisits
+        WHERE moz_places.id = moz_historyvisits.place_id
+        ORDER BY visit_date;
 EOF
+    fi
 fi
 
 if [[ -n $optSetup ]] && [[ -n $warnProfileNotSet ]]; then
-    echo 
+    echo
     echo "--setup used!"
     echo
     echo "We used the most recent directory in $firefoxdir ($profile)"
@@ -115,11 +147,11 @@ if [[ -n $optSetup ]] && [[ -n $warnProfileNotSet ]]; then
         echo
         read -p "Can we write \"$profile\" to $locationfile (to use it as the profile)? [y/n/D[ont_ask_anymore]] "
         case $REPLY in
-            y) 
+            y)
                 echo "$profile" > "$locationfile"
                 loop=0
                 ;;
-            d*) 
+            d*)
                 echo "Ok, we just create an empty $locationfile file then."
                 echo "Should you want to specify a default profile, put it there (whether it is $profile or another one)"
                 touch "$locationfile"
